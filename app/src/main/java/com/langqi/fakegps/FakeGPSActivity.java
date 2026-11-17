@@ -2,10 +2,13 @@ package com.langqi.fakegps;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -38,6 +41,10 @@ import javax.xml.parsers.ParserConfigurationException;
 public class FakeGPSActivity extends AppCompatActivity {
     private static final String LOG_TAG = "langqi_log";
     private static final int REQUEST_CODE_PICK_KML = 1;
+    private static final String PREFS_NAME = "fakegps_prefs";
+    private static final String KEY_DEFAULT_KML_URI = "default_kml_uri";
+
+    private Uri currentKmlUri = null;
 
     private EditText kmlFilePath;
     private TextView kmlInfo;
@@ -62,11 +69,16 @@ public class FakeGPSActivity extends AppCompatActivity {
     private long lastUpdateTime = 0;
     private Timer timer = new Timer();
 
-    private final ActivityResultLauncher<String> getContent = registerForActivityResult(
-            new ActivityResultContracts.GetContent(),
+    private final ActivityResultLauncher<String[]> getContent = registerForActivityResult(
+            new ActivityResultContracts.OpenDocument(),
             uri -> {
                 if (uri != null) {
-                    kmlFilePath.setText(uri.toString());
+                    if (!isKmlFile(uri)) {
+                        Toast.makeText(this, "请选择 .kml 文件", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    currentKmlUri = uri;
+                    kmlFilePath.setText(getFileName(uri));
                     processKmlFile(uri);
                 }
             });
@@ -119,7 +131,14 @@ public class FakeGPSActivity extends AppCompatActivity {
 
     private void setupClickListeners() {
         findViewById(R.id.btn_browse)
-                .setOnClickListener(v -> getContent.launch("application/vnd.google-earth.kml+xml"));
+                .setOnClickListener(v -> getContent.launch(new String[]{
+                        "application/vnd.google-earth.kml+xml",
+                        "application/xml",
+                        "text/xml"
+                }));
+
+        findViewById(R.id.btn_set_default)
+                .setOnClickListener(v -> setCurrentFileAsDefault());
 
         btnStart.setOnClickListener(v -> startProcessing());
         btnPause.setOnClickListener(v -> pauseProcessing());
@@ -127,12 +146,12 @@ public class FakeGPSActivity extends AppCompatActivity {
         btnStop.setOnClickListener(v -> stopProcessing());
     }
 
-    private void processKmlFile(Uri uri) {
+    private boolean processKmlFile(Uri uri) {
         try {
             InputStream inputStream = getContentResolver().openInputStream(uri);
             if (inputStream == null) {
                 Toast.makeText(this, "无法读取 KML 文件", Toast.LENGTH_SHORT).show();
-                return;
+                return false;
             }
 
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -142,7 +161,7 @@ public class FakeGPSActivity extends AppCompatActivity {
             NodeList coordinatesList = document.getElementsByTagName("coordinates");
             if (coordinatesList.getLength() == 0) {
                 Toast.makeText(this, "未找到坐标数据", Toast.LENGTH_SHORT).show();
-                return;
+                return false;
             }
 
             String coordinatesText = coordinatesList.item(0).getTextContent().trim();
@@ -151,10 +170,59 @@ public class FakeGPSActivity extends AppCompatActivity {
 
             kmlInfo.setText(String.format("路径点数量: %d, 路径总距离: %.2f m",
                     coordinates.size(), totalDistance));
+            return true;
         } catch (IOException | ParserConfigurationException | SAXException e) {
             Log.e(LOG_TAG, "处理 KML 文件时出错", e);
             Toast.makeText(this, "处理 KML 文件时出错", Toast.LENGTH_SHORT).show();
+            return false;
         }
+    }
+
+    private void setCurrentFileAsDefault() {
+        if (currentKmlUri == null) {
+            Toast.makeText(this, "请先浏览并选择一个 KML 文件", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    currentKmlUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException e) {
+            Log.w(LOG_TAG, "无法持久化读取权限: " + e.getMessage());
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DEFAULT_KML_URI, currentKmlUri.toString())
+                .apply();
+        Toast.makeText(this, "已设为默认 KML 文件", Toast.LENGTH_SHORT).show();
+    }
+
+    private boolean isKmlFile(Uri uri) {
+        String name = getFileName(uri);
+        return name != null && name.toLowerCase().endsWith(".kml");
+    }
+
+    private String getFileName(Uri uri) {
+        String name = null;
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst()) {
+                int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    name = cursor.getString(idx);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "获取文件名失败", e);
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        if (name == null || name.isEmpty()) {
+            name = uri.getLastPathSegment();
+        }
+        return name;
     }
 
     private void parseCoordinates(String coordinatesText) {
@@ -353,6 +421,22 @@ public class FakeGPSActivity extends AppCompatActivity {
     }
 
     private void loadDefaultKmlFile() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String savedUri = prefs.getString(KEY_DEFAULT_KML_URI, null);
+        if (savedUri != null && !savedUri.isEmpty()) {
+            Uri uri = Uri.parse(savedUri);
+            if (processKmlFile(uri)) {
+                currentKmlUri = uri;
+                kmlFilePath.setText(getFileName(uri));
+                return;
+            }
+            Log.e(LOG_TAG, "无法读取已保存的默认 KML 文件，回退到内置文件");
+        }
+        loadBuiltInKmlFile();
+    }
+
+    private void loadBuiltInKmlFile() {
+        currentKmlUri = null;
         try {
             InputStream inputStream = getResources().openRawResource(R.raw.three_km);
             if (inputStream != null) {
