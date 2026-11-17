@@ -32,6 +32,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.xml.parsers.DocumentBuilder;
@@ -43,6 +44,7 @@ public class FakeGPSActivity extends AppCompatActivity {
     private static final int REQUEST_CODE_PICK_KML = 1;
     private static final String PREFS_NAME = "fakegps_prefs";
     private static final String KEY_DEFAULT_KML_URI = "default_kml_uri";
+    private static final String KEY_START_BUCKET = "start_bucket";
 
     private Uri currentKmlUri = null;
 
@@ -53,6 +55,7 @@ public class FakeGPSActivity extends AppCompatActivity {
     private EditText inputInterval;
     private EditText inputAltitude;
     private EditText inputAcceleration;
+    private EditText inputTargetDistance;
     private ProgressBar progressBar;
     private Button btnStart;
     private Button btnPause;
@@ -60,6 +63,7 @@ public class FakeGPSActivity extends AppCompatActivity {
     private Button btnStop;
 
     private List<Coordinate> coordinates = new ArrayList<>();
+    private List<Coordinate> referenceCoordinates = new ArrayList<>();
     private List<Double> progressList = new ArrayList<>();
     private double totalDistance = 0;
     private boolean isRunning = false;
@@ -102,6 +106,7 @@ public class FakeGPSActivity extends AppCompatActivity {
         inputInterval = findViewById(R.id.input_interval);
         inputAltitude = findViewById(R.id.input_altitude);
         inputAcceleration = findViewById(R.id.input_acceleration);
+        inputTargetDistance = findViewById(R.id.input_target_distance);
         progressBar = findViewById(R.id.progress_bar);
         btnStart = findViewById(R.id.btn_start);
         btnPause = findViewById(R.id.btn_pause);
@@ -140,6 +145,9 @@ public class FakeGPSActivity extends AppCompatActivity {
         findViewById(R.id.btn_set_default)
                 .setOnClickListener(v -> setCurrentFileAsDefault());
 
+        findViewById(R.id.btn_generate)
+                .setOnClickListener(v -> generateRandomTrack());
+
         btnStart.setOnClickListener(v -> startProcessing());
         btnPause.setOnClickListener(v -> pauseProcessing());
         btnResume.setOnClickListener(v -> resumeProcessing());
@@ -167,6 +175,7 @@ public class FakeGPSActivity extends AppCompatActivity {
             String coordinatesText = coordinatesList.item(0).getTextContent().trim();
             parseCoordinates(coordinatesText);
             calculateProgressList();
+            referenceCoordinates = new ArrayList<>(coordinates);
 
             kmlInfo.setText(String.format("路径点数量: %d, 路径总距离: %.2f m",
                     coordinates.size(), totalDistance));
@@ -194,6 +203,62 @@ public class FakeGPSActivity extends AppCompatActivity {
                 .putString(KEY_DEFAULT_KML_URI, currentKmlUri.toString())
                 .apply();
         Toast.makeText(this, "已设为默认 KML 文件", Toast.LENGTH_SHORT).show();
+    }
+
+    private void generateRandomTrack() {
+        if (referenceCoordinates.isEmpty()) {
+            Toast.makeText(this, "请先加载参考跑道", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        double totalMeters;
+        try {
+            totalMeters = Double.parseDouble(inputTargetDistance.getText().toString());
+        } catch (NumberFormatException e) {
+            Toast.makeText(this, "请输入有效的目标里程", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (totalMeters <= 0) {
+            Toast.makeText(this, "目标里程需大于 0", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        List<TrackGenerator.Point> reference = new ArrayList<>();
+        for (Coordinate c : referenceCoordinates) {
+            reference.add(new TrackGenerator.Point(c.longitude, c.latitude));
+        }
+
+        int bucket = readStartBucket();
+        List<TrackGenerator.Point> generated = TrackGenerator.generate(
+                reference, totalMeters, TrackGenerator.MARGIN_M, bucket, new Random());
+        if (generated == null || generated.isEmpty()) {
+            Toast.makeText(this, "参考路线不是闭合跑道，无法生成", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        writeStartBucket((bucket + 1) % TrackGenerator.START_OFFSET_BUCKETS);
+
+        coordinates.clear();
+        for (TrackGenerator.Point p : generated) {
+            coordinates.add(new Coordinate(p.lat, p.lon));
+        }
+        calculateProgressList();
+        kmlInfo.setText(String.format("已生成随机路线：%d 点, 总距离 %.2f m",
+                coordinates.size(), totalDistance));
+        kmlFilePath.setText(String.format("随机路线 (目标 %.0f m)", totalMeters));
+        updateButtonStates();
+    }
+
+    private int readStartBucket() {
+        int bucket = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getInt(KEY_START_BUCKET, 0);
+        return ((bucket % TrackGenerator.START_OFFSET_BUCKETS) + TrackGenerator.START_OFFSET_BUCKETS)
+                % TrackGenerator.START_OFFSET_BUCKETS;
+    }
+
+    private void writeStartBucket(int value) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_START_BUCKET, value)
+                .apply();
     }
 
     private boolean isKmlFile(Uri uri) {
@@ -449,6 +514,7 @@ public class FakeGPSActivity extends AppCompatActivity {
                     String coordinatesText = coordinatesList.item(0).getTextContent().trim();
                     parseCoordinates(coordinatesText);
                     calculateProgressList();
+                    referenceCoordinates = new ArrayList<>(coordinates);
                     kmlInfo.setText(String.format("路径点数量: %d, 路径总距离: %.2f m",
                             coordinates.size(), totalDistance));
                     kmlFilePath.setText("默认路径 (3km.kml)");
